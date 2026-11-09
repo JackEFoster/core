@@ -46,10 +46,10 @@ defmodule Platform.SignIn.DurableLinkTest do
     user = user!()
     now = System.system_time(:second)
 
-    old = DurableLink.url(user, :handover, signed_at: (now - DurableLink.max_age() - 5) * 1000)
+    old = DurableLink.url(user, :handover, signed_at: now - DurableLink.max_age() - 5)
     assert {:error, :expired} = old |> token_of() |> DurableLink.verify()
 
-    fresh = DurableLink.url(user, :handover, signed_at: (now - DurableLink.max_age() + 60) * 1000)
+    fresh = DurableLink.url(user, :handover, signed_at: now - DurableLink.max_age() + 60)
     assert {:ok, _} = fresh |> token_of() |> DurableLink.verify()
   end
 
@@ -78,10 +78,12 @@ defmodule Platform.SignIn.DurableLinkTest do
     token = user |> DurableLink.url(:handover) |> token_of()
     assert {:ok, _} = DurableLink.verify(token)
 
-    {:ok, _} = Accounts.archive_user(user, reason: "sign-in disabled")
+    {:ok, archived} = Accounts.archive_user(user, reason: "sign-in disabled")
     assert {:error, :archived} = DurableLink.verify(token)
 
-    {:ok, _} = Accounts.unarchive_user(user)
+    # Unarchive the ARCHIVED struct: a changeset on the stale pre-archive struct
+    # has no changes and would be a silent no-op.
+    {:ok, _} = Accounts.unarchive_user(archived)
     assert {:ok, _} = DurableLink.verify(token)
   end
 

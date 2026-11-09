@@ -588,8 +588,9 @@ defmodule Platform.SignInAdminTest do
       assert email.subject == "#{admin.name || admin.email} invited you to #{org}'s Burrow"
       assert email.text_body =~ "Join: "
       assert email.html_body =~ ">Join</a>"
-      # Until walter/durable-signin merges, the email carries the slip's link.
-      assert email.text_body =~ link.url
+      # The email carries the durable multi-use link, not the slip's 30-minute one.
+      assert email.text_body =~ "/auth/link?token="
+      refute email.text_body =~ link.url
       assert user.email == "maria@example.test"
     end
 
