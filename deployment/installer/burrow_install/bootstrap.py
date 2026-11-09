@@ -2,7 +2,8 @@
 
     python3 -m burrow_install bootstrap-admin --base https://<auth host> \\
         --api-key-file <0600 file> --email <addr> [--username <u>] --link-file <path> \\
-        [--primary <host> [--oidc-secret-file <0600 file>]]
+        [--primary <host> [--oidc-secret-file <0600 file>]
+         [--durable-link-file <path> [--core-base <url>]]]
 
 For an install provisioned by someone else (a droplet), where the Mac-oriented
 ``setup`` CLI does not apply. It reuses ``setup/pocketid.py`` (target-agnostic):
@@ -28,6 +29,21 @@ For an install provisioned by someone else (a droplet), where the Mac-oriented
    same 4-character prefix is already listed. A single-host render has no
    other step that registers the client, so without this core's sign-in
    cannot complete on a droplet.
+
+5. With ``--durable-link-file`` (needs ``--primary``): ask core for the owner's
+   durable sign-in link, ``POST <core>/api/install/handover-link`` with
+   ``Authorization: Bearer <the API key>`` and ``{"email", "sub"}`` (``sub`` is
+   the pocket-id user id, so core can create the owner's Burrow user before
+   the first login; see ``InstallHandoverLinkController``), and write the
+   returned ``/auth/link?token=...`` URL there with mode 0600. Unlike the
+   30-minute one-time link it works for 14 days and more than once, which is
+   what the "ready" email needs. It goes in its OWN file so ``--link-file``
+   keeps its one-line format for existing readers. ``<core>`` is
+   ``https://<primary>`` unless ``--core-base`` says otherwise (https, or http
+   on loopback for tests). Core may not be answering yet at bootstrap, so a
+   failure here is NOT fatal: the one-time link is already written, and the
+   JSON says ``"durable_link": "written"`` or ``"unavailable"`` with a
+   ``durable_link_error`` code, so the caller can retry later.
 
 The link is a credential until it is used or expires, and the API key is the
 pocket-id admin credential, so neither is EVER printed. stdout carries exactly
@@ -84,6 +100,12 @@ def _parser():
     parser.add_argument(
         "--oidc-secret-file", default=None, help="0600 file holding OIDC_CLIENT_SECRET"
     )
+    parser.add_argument(
+        "--durable-link-file", default=None, help="owner's durable link, written with mode 0600"
+    )
+    parser.add_argument(
+        "--core-base", default=None, help="core's base URL (default https://<primary>)"
+    )
     return parser
 
 
@@ -123,6 +145,41 @@ def read_api_key(path, flag="--api-key-file", code="api_key_file"):
 def handover_link(primary, code):
     """Core's hand-over sign-in route on ``primary`` for one-time ``code``."""
     return f"https://{primary}/auth/handover?" + urllib.parse.urlencode({"code": code})
+
+
+def core_base_of(primary, override):
+    """Core's origin: ``--core-base``, else ``https://<primary>``. http only on loopback."""
+    if override is None:
+        return f"https://{primary}"
+    parsed = urllib.parse.urlparse(override)
+    if not parsed.hostname or parsed.scheme not in ("https", "http"):
+        raise UsageError("invalid_core_base", "--core-base must be https://<host>")
+    if parsed.scheme == "http" and parsed.hostname not in _LOOPBACK:
+        raise UsageError(
+            "invalid_core_base", "--core-base must be https:// (http is loopback-only)"
+        )
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise UsageError("invalid_core_base", "--core-base is the origin only, with no path")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def fetch_durable_link(core_base, api_key, email, sub):
+    """The owner's durable sign-in URL from core. Raises ``web.WebError`` or ``ValueError``."""
+    resp = web.request(
+        "POST",
+        core_base + "/api/install/handover-link",
+        headers={"Authorization": f"Bearer {api_key}"},
+        body={"email": email, "sub": sub},
+    )
+    if resp.status != 200:
+        raise ValueError(f"http_{resp.status}")
+    try:
+        url = (resp.json() or {}).get("url")
+    except ValueError:
+        url = None
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        raise ValueError("bad_response")
+    return url
 
 
 def ensure_oidc_client(client, primary, secret):
@@ -183,6 +240,16 @@ def run(args):
         raise UsageError("usage", "--oidc-secret-file needs --primary")
     if args.primary is not None and not _valid_host(args.primary):
         raise UsageError("invalid_primary", "--primary must be a host name")
+    if args.durable_link_file is not None:
+        if args.primary is None:
+            raise UsageError("usage", "--durable-link-file needs --primary")
+        if not os.path.isdir(os.path.dirname(os.path.abspath(args.durable_link_file))):
+            raise UsageError(
+                "invalid_durable_link_file", "--durable-link-file's directory does not exist"
+            )
+    if args.core_base is not None and args.durable_link_file is None:
+        raise UsageError("usage", "--core-base needs --durable-link-file")
+    core_base = core_base_of(args.primary, args.core_base) if args.durable_link_file else None
     key = read_api_key(args.api_key_file)
     oidc_secret = None
     if args.oidc_secret_file is not None:
@@ -196,6 +263,19 @@ def run(args):
         link = pocketid.login_link(client, user["id"], auth_host)
     write_link(args.link_file, link)
     extra = {}
+    if core_base is not None:
+        try:
+            durable = fetch_durable_link(core_base, key, args.email, user["id"])
+        except web.WebError as exc:
+            extra["durable_link"] = "unavailable"
+            extra["durable_link_error"] = exc.kind
+        except ValueError as exc:
+            extra["durable_link"] = "unavailable"
+            extra["durable_link_error"] = str(exc)
+        else:
+            write_link(args.durable_link_file, durable)
+            extra["durable_link"] = "written"
+            extra["durable_link_file"] = os.path.abspath(args.durable_link_file)
     if oidc_secret is not None:
         oidc_action = ensure_oidc_client(client, args.primary, oidc_secret)
         extra["oidc_client"] = "created" if oidc_action == "created" else "exists"

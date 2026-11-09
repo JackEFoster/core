@@ -48,7 +48,7 @@ sys.path.insert(0, INSTALLER)
 sys.path.insert(0, HERE)
 
 from identity_terms import identity_hits
-from setup_fakes import FakePocketId, write_secret_file
+from setup_fakes import FakePocketId, _Server, write_secret_file
 
 from burrow_install import registry, templates
 from burrow_install.__main__ import main
@@ -785,6 +785,28 @@ def closed_port():
         return sock.getsockname()[1]
 
 
+class FakeCore(_Server):
+    """core's ``POST /api/install/handover-link`` (bearer-authenticated)."""
+
+    DURABLE = "https://acme.example.test/auth/link?token=FAKE-durable-token-0123456789"
+
+    def __init__(self, key, status=200):
+        super().__init__()
+        self.key = key
+        self.status = status
+        self.bodies = []
+
+    def dispatch(self, method, path, headers, data):
+        if (method, path) != ("POST", "/api/install/handover-link"):
+            return 404, None, None
+        if headers.get("Authorization") != f"Bearer {self.key}":
+            return 404, None, None
+        self.bodies.append(data)
+        if self.status != 200:
+            return self.status, {"error": "no_such_user"}, None
+        return 200, {"url": self.DURABLE}, None
+
+
 class BootstrapAdminTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="burrow-bootstrap-01a10315-")
@@ -951,6 +973,84 @@ class BootstrapAdminTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIs(client["skipConsent"], True)
         self.assertEqual(client["description"], "kept")
+
+    def durable_flags(self, core):
+        self.durable_file = os.path.join(self.tmp, "durable-link")
+        return (
+            "--primary",
+            "acme.example.test",
+            "--durable-link-file",
+            self.durable_file,
+            "--core-base",
+            core.url,
+        )
+
+    def test_durable_link_is_fetched_from_core_and_written_next_to_the_one_time_link(self):
+        core = FakeCore(API_KEY)
+        self.addCleanup(core.close)
+        code, out, err = self.bootstrap(*self.durable_flags(core))
+        self.assertEqual(code, 0, out)
+        doc = json.loads(out)
+        self.assertEqual(doc["durable_link"], "written")
+        self.assertEqual(doc["durable_link_file"], self.durable_file)
+        self.assertEqual(stat.S_IMODE(os.stat(self.durable_file).st_mode), 0o600)
+        with open(self.durable_file, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), FakeCore.DURABLE + "\n")
+        # The one-time link is unchanged, and core got the pocket-id user id as sub.
+        token = self.fake.tokens[-1]
+        self.assertEqual(
+            self.read_link(), f"https://acme.example.test/auth/handover?code={token}\n"
+        )
+        owner = [u for u in self.fake.users if u.get("email") == EMAIL][0]
+        self.assertEqual(core.bodies, [{"email": EMAIL, "sub": owner["id"]}])
+        # Neither the URL, its token nor the key is printed.
+        self.assertEqual(self.secret_hits(out + err), [])
+        self.assertNotIn("FAKE-durable-token", out + err)
+
+    def test_a_core_that_cannot_answer_leaves_the_one_time_link_and_reports_it(self):
+        # Wrong key (core answers 404) and nothing listening.
+        for core_base, error in (
+            (FakeCore("some-other-key"), "http_404"),
+            (None, "connection_refused"),
+        ):
+            with self.subTest(error=error):
+                if core_base is not None:
+                    self.addCleanup(core_base.close)
+                url = core_base.url if core_base else f"http://127.0.0.1:{closed_port()}"
+                flags = (
+                    "--primary",
+                    "acme.example.test",
+                    "--durable-link-file",
+                    os.path.join(self.tmp, "durable-link"),
+                    "--core-base",
+                    url,
+                )
+                code, out, err = self.bootstrap(*flags)
+                self.assertEqual(code, 0, out)
+                doc = json.loads(out)
+                self.assertEqual(doc["durable_link"], "unavailable")
+                self.assertEqual(doc["durable_link_error"], error)
+                self.assertFalse(os.path.exists(os.path.join(self.tmp, "durable-link")))
+                self.assertIn("/auth/handover?code=", self.read_link())
+                self.assertEqual(self.secret_hits(out + err), [])
+
+    def test_durable_link_flags_are_validated(self):
+        core = FakeCore(API_KEY)
+        self.addCleanup(core.close)
+        durable = os.path.join(self.tmp, "durable-link")
+        cases = {
+            "usage": self.bootstrap("--durable-link-file", durable),
+            "invalid_core_base": self.bootstrap(
+                "--primary", "acme.example.test", "--durable-link-file", durable,
+                "--core-base", "http://core.acme-bakery.test",
+            ),
+        }
+        for error, (code, out, _err) in cases.items():
+            with self.subTest(error=error):
+                self.assertEqual(code, 2, out)
+                self.assertEqual(json.loads(out)["error"], error)
+        self.assertEqual(core.bodies, [])
+        self.assertFalse(os.path.exists(durable))
 
     def test_runs_as_the_documented_module_command(self):
         env = dict(os.environ, PYTHONPATH=INSTALLER)
