@@ -1068,6 +1068,148 @@ class BootstrapAdminTest(unittest.TestCase):
         self.assertEqual(self.secret_hits(proc.stdout + proc.stderr), [])
 
 
+class BootstrapBrandingTest(unittest.TestCase):
+    """bootstrap-admin's appearance step: pocket-id's name, accent and logo, API only.
+
+    Against the in-process fake (always runs). The fake mirrors pocket-id v2.18.0:
+    GET /api/application-configuration/all, PUT replacing the whole config, and
+    PUT /api/application-images/logo. Nothing here has run against a real
+    pocket-id; the real-container gate in test_setup_pocketid.py is where that
+    check belongs.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="burrow-branding-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.fake = FakePocketId(API_KEY)
+        self.addCleanup(self.fake.close)
+        self.key_file = write_secret_file(self.tmp, "api-key", API_KEY)
+        self.link_file = os.path.join(self.tmp, "login-link")
+        self.logo = os.path.join(self.tmp, "logo.svg")
+        with open(self.logo, "wb") as handle:
+            handle.write(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+
+    def bootstrap(self, *extra):
+        return run_main(
+            "bootstrap-admin",
+            "--base",
+            self.fake.url,
+            "--api-key-file",
+            self.key_file,
+            "--email",
+            EMAIL,
+            "--link-file",
+            self.link_file,
+            *extra,
+        )
+
+    def config_requests(self):
+        return [r for r in self.fake.requests if "application-" in r[1]]
+
+    def test_no_flags_sends_nothing_and_says_skipped(self):
+        code, out, _err = self.bootstrap()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["branding"], "skipped")
+        self.assertEqual(self.config_requests(), [])
+
+    def test_name_and_accent_are_set_and_every_other_setting_is_kept(self):
+        before = dict(self.fake.config)
+        code, out, err = self.bootstrap("--app-name", "Legacy Pie", "--accent-color", "#a4123f")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["branding"], "applied")
+        self.assertEqual(len(self.fake.config_puts), 1)
+        after = self.fake.config
+        self.assertEqual((after["appName"], after["accentColor"]), ("Legacy Pie", "#a4123f"))
+        # The update replaces the whole config, so everything else must ride along unchanged,
+        # the secret included.
+        for key in set(before) - {"appName", "accentColor"}:
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual(self.fake.config_puts[0].keys(), before.keys())
+        self.assertNotIn("smtp-secret-kept-exactly", out + err)
+        self.assertNotIn(API_KEY, out + err)
+
+    def test_a_second_run_finds_it_present_and_writes_nothing(self):
+        self.bootstrap("--app-name", "Legacy Pie")
+        code, out, _err = self.bootstrap("--app-name", "Legacy Pie")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["branding"], "present")
+        self.assertEqual(len(self.fake.config_puts), 1)
+
+    def test_only_the_name_leaves_the_accent_alone(self):
+        self.bootstrap("--app-name", "Legacy Pie")
+        self.assertEqual(self.fake.config["accentColor"], "default")
+
+    def test_the_logo_is_uploaded_for_light_and_dark(self):
+        code, out, _err = self.bootstrap("--logo-file", self.logo)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["branding"], "applied")
+        self.assertEqual([u["light"] for u in self.fake.logos], ["true", "false"])
+        for upload in self.fake.logos:
+            self.assertTrue(upload["content_type"].startswith("multipart/form-data; boundary="))
+            self.assertIn(b'name="file"; filename="logo.svg"', upload["body"])
+            self.assertIn(b"<svg xmlns=", upload["body"])
+        self.assertEqual(self.fake.config_puts, [])
+
+    def test_usage_errors_write_no_link_and_send_nothing(self):
+        too_long = "x" * 31
+        big = os.path.join(self.tmp, "big.png")
+        with open(big, "wb") as handle:
+            handle.write(b"0" * (pocketid.LOGO_MAX_BYTES + 1))
+        bad_ext = os.path.join(self.tmp, "logo.gif")
+        with open(bad_ext, "wb") as handle:
+            handle.write(b"GIF89a")
+        cases = {
+            "invalid_app_name": ["--app-name", too_long],
+            "invalid_app_name ": ["--app-name", " padded "],
+            "invalid_accent_color": ["--accent-color", "rgb(1,2,3)"],
+            "invalid_logo_file": ["--logo-file", big],
+            "invalid_logo_file ": ["--logo-file", bad_ext],
+            "invalid_logo_file  ": ["--logo-file", os.path.join(self.tmp, "absent.svg")],
+        }
+        for code_name, flags in cases.items():
+            with self.subTest(code_name):
+                code, out, _err = self.bootstrap(*flags)
+                self.assertEqual(code, 2, out)
+                self.assertEqual(json.loads(out)["error"], code_name.strip())
+        self.assertFalse(os.path.exists(self.link_file))
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_branding_failure_does_not_strand_the_hand_over(self):
+        self.fake.config_put_status = 400
+        code, out, _err = self.bootstrap("--app-name", "Legacy Pie")
+        self.assertEqual(code, 0, out)
+        doc = json.loads(out)
+        self.assertEqual((doc["ok"], doc["branding"]), (True, "failed"))
+        self.assertEqual(doc["branding_error"], "pocketid_api_error")
+        self.assertTrue(os.path.exists(self.link_file))
+        self.assertEqual(self.fake.config_puts, [])
+
+    def test_a_redacted_config_is_never_written_back(self):
+        self.fake.config["smtpPassword"] = pocketid.REDACTED
+        code, out, _err = self.bootstrap("--app-name", "Legacy Pie")
+        self.assertEqual(code, 0, out)
+        doc = json.loads(out)
+        self.assertEqual((doc["branding"], doc["branding_error"]), ("failed", "pocketid_config_locked"))
+        self.assertEqual(self.fake.config_puts, [])
+        self.assertEqual(self.fake.config["smtpPassword"], pocketid.REDACTED)
+
+    def test_an_empty_settings_list_is_a_reported_failure(self):
+        self.fake.config = {}
+        code, out, _err = self.bootstrap("--app-name", "Legacy Pie")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["branding_error"], "pocketid_config_unreadable")
+
+    def test_validators(self):
+        self.assertTrue(pocketid.valid_app_name("Legacy Pie"))
+        self.assertTrue(pocketid.valid_app_name("x" * 30))
+        for bad in ("", "x" * 31, " a", "a ", "line\nbreak", "e\u0301"):
+            self.assertFalse(pocketid.valid_app_name(bad), repr(bad))
+        for good in ("default", "#abc", "#a4123f", "#a4123fcc", "crimson"):
+            self.assertTrue(pocketid.valid_accent_color(good), good)
+        for bad in ("", "#abcd1", "rgb(1,2,3)", "red; x", "<b>", "url(x)"):
+            self.assertFalse(pocketid.valid_accent_color(bad), bad)
+
+ 
 if __name__ == "__main__":
     unittest.main()
 
