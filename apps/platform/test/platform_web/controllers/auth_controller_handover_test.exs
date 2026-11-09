@@ -206,7 +206,10 @@ defmodule PlatformWeb.AuthControllerHandoverTest do
         ] do
       conn = get(build_conn(), path)
       assert conn.status == 400, path
-      assert conn.resp_body == "This sign-in link has expired or was already used. Ask for a new one."
+
+      assert conn.resp_body ==
+               "This sign-in link has expired or was already used. Ask for a new one."
+
       refute get_session(conn, :post_login_path)
     end
 

@@ -576,7 +576,11 @@ defmodule Platform.SignInAdminTest do
       fake!(ids: ["pid-mail"])
 
       assert {:ok, %{user: user, link: link, emailed?: true}} =
-               SignInAdmin.invite(admin, %{email: "maria@example.test", name: "Maria", role: :member})
+               SignInAdmin.invite(admin, %{
+                 email: "maria@example.test",
+                 name: "Maria",
+                 role: :member
+               })
 
       assert_received {:mail_test_adapter, email, _config}
       assert email.to == [{"", "maria@example.test"}]

@@ -437,14 +437,16 @@ end
 # vocabulary as a mail account's smtp_tls; default starttls). Never set under
 # :test, which injects its own values with Application.put_env.
 if config_env() != :test and System.get_env("SYSTEM_SMTP_HOST") not in [nil, ""] do
+  system_smtp_port =
+    case System.get_env("SYSTEM_SMTP_PORT") do
+      v when v in [nil, ""] -> nil
+      v -> String.to_integer(v)
+    end
+
   config :platform, Platform.Mail.System,
     from: System.get_env("SYSTEM_MAIL_FROM"),
     host: System.get_env("SYSTEM_SMTP_HOST"),
-    port:
-      case System.get_env("SYSTEM_SMTP_PORT") do
-        v when v in [nil, ""] -> nil
-        v -> String.to_integer(v)
-      end,
+    port: system_smtp_port,
     username: System.get_env("SYSTEM_SMTP_USERNAME"),
     password: System.get_env("SYSTEM_SMTP_PASSWORD"),
     tls: System.get_env("SYSTEM_SMTP_TLS", "starttls")

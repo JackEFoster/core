@@ -2849,7 +2849,11 @@ defmodule PlatformWeb.ChatLiveTest do
       ]
 
       first = render_hook(view, "mention_query", %{"query" => "", "source" => source})
-      assert first |> LazyHTML.from_fragment() |> LazyHTML.query(list <> " [role=option]") |> Enum.count() > 0
+
+      assert first
+             |> LazyHTML.from_fragment()
+             |> LazyHTML.query(list <> " [role=option]")
+             |> Enum.count() > 0
 
       second = render_hook(view, "mention_query", %{"query" => "g", "source" => source})
 

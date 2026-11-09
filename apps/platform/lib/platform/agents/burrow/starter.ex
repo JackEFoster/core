@@ -76,7 +76,9 @@ defmodule Platform.Agents.Burrow.Starter do
   @doc "`\"active\"`, `\"retired\"` or nil: the mark on `agent`, read from the database."
   @spec state(Agent.t()) :: String.t() | nil
   def state(%Agent{id: id}) do
-    query = from(a in Agent, where: a.id == ^id, select: fragment("?->>'starter_key'", a.metadata))
+    query =
+      from(a in Agent, where: a.id == ^id, select: fragment("?->>'starter_key'", a.metadata))
+
     Repo.one(query)
   end
 

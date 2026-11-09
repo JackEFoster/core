@@ -350,7 +350,8 @@ defmodule Platform.SignInAdmin do
 
     app =
       if @app_url,
-        do: ~s(<p>On iPhone? <a href="#{html_escape(@app_url)}">Get the Burrow app</a> and sign in with Face ID.</p>),
+        do:
+          ~s(<p>On iPhone? <a href="#{html_escape(@app_url)}">Get the Burrow app</a> and sign in with Face ID.</p>),
         else: ""
 
     """

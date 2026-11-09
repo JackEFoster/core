@@ -86,7 +86,9 @@ defmodule Platform.Mail.System do
     end
   end
 
-  defp maybe_html(email, html) when is_binary(html) and html != "", do: Email.html_body(email, html)
+  defp maybe_html(email, html) when is_binary(html) and html != "",
+    do: Email.html_body(email, html)
+
   defp maybe_html(email, _), do: email
 
   # "Burrow <noreply@x>" -> {"Burrow", "noreply@x"}; a bare address stays bare.

@@ -1013,8 +1013,7 @@ defmodule PlatformWeb.ConnectAiLive do
     do: "This account doesn't have Claude Pro or Max. Sign in with the account that does."
 
   def claude_failure_text(:server),
-    do:
-      "Burrow didn't answer. Try again in a minute. If it keeps happening, ask Burrow support."
+    do: "Burrow didn't answer. Try again in a minute. If it keeps happening, ask Burrow support."
 
   @doc "The Claude card's connected line: the account and plan when a submit returned them."
   def claude_connected_text(%{account: account} = login) when is_binary(account) do
